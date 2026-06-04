@@ -228,10 +228,40 @@ def testar_aplicar_feromonio_externo():
     log("\nTeste de aplicação de feromônio externo concluído com sucesso.")
 
 
+def testar_substituir_feromonio():
+    log("\n=== TESTE SUBSTITUIR FEROMONIO ===\n")
+
+    matriz_distancias = obter_matriz_distancias()
+    aco = ACO(matriz_distancias)
+
+    tamanho = len(matriz_distancias)
+    matriz_nova = criar_matriz_feromonio_externa(tamanho, valor=0.75)
+
+    aco.substituir_feromonio(matriz_nova)
+    feromonio_depois = aco.obter_feromonio()
+
+    assert feromonio_depois[0][1] == 0.75, (
+        "O feromonio deve ser substituido diretamente pelo novo valor."
+    )
+
+    assert feromonio_depois[0][0] == 0.0, (
+        "A diagonal principal deve continuar zero apos substituir feromonio."
+    )
+
+    matriz_nova[0][1] = 9.99
+
+    assert feromonio_depois[0][1] == 0.75, (
+        "A matriz interna nao deve compartilhar referencia com a matriz recebida."
+    )
+
+    log("Teste de substituicao completa do feromonio concluido com sucesso.")
+
+
 def main():
     testar_execucao_aco()
     testar_obter_feromonio()
     testar_aplicar_feromonio_externo()
+    testar_substituir_feromonio()
 
     log("\nTESTE ACO FINALIZADO COM SUCESSO\n")
 

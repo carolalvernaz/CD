@@ -64,6 +64,35 @@ class ACO:
                         self.feromonio[i][j] + matriz_externa[i][j]
                     ) / 2
 
+    def substituir_feromonio(self, matriz_nova: list[list[float]]) -> None:
+        self._validar_matriz_generica(matriz_nova, "matriz_nova")
+
+        if len(matriz_nova) != self.quantidade_cidades:
+            raise ValueError("matriz_nova deve ter o mesmo tamanho da instancia.")
+
+        nova_matriz = []
+
+        for i in range(self.quantidade_cidades):
+            linha = []
+
+            for j in range(self.quantidade_cidades):
+                valor = matriz_nova[i][j]
+
+                if not isinstance(valor, (int, float)):
+                    raise TypeError("matriz_nova deve conter apenas numeros.")
+
+                if valor < 0:
+                    raise ValueError("matriz_nova nao pode conter valores negativos.")
+
+                if i == j:
+                    linha.append(0.0)
+                else:
+                    linha.append(float(valor))
+
+            nova_matriz.append(linha)
+
+        self.feromonio = nova_matriz
+
     def obter_melhor_global(self) -> tuple[list, float]:
         if self.melhor_rota_global is None:
             return [], inf

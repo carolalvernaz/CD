@@ -5,6 +5,7 @@ Projeto em Python para simular um sistema distribuido com:
 - comunicacao entre nos via sockets TCP;
 - relogio logico de Lamport;
 - eleicao de lider pelo algoritmo Bully;
+- recuperacao de estado apos falha do lider;
 - ACO (Ant Colony Optimization) distribuido para o problema do caixeiro viajante.
 
 ## Requisitos
@@ -25,9 +26,11 @@ python src\testes\teste_lamport.py
 python src\testes\teste_rede.py
 python src\testes\teste_bully.py
 python src\testes\teste_aco.py
+python src\testes\teste_recuperacao.py
 ```
 
 O teste `teste_bully.py` abre portas locais e pode levar alguns segundos, porque simula queda de nos e aguarda a eleicao de novo lider.
+O teste `teste_recuperacao.py` valida o protocolo de recuperacao: o novo lider solicita a matriz de feromonio de um worker, consolida a media e substitui sua matriz local pelo estado recuperado.
 
 ## Como rodar o sistema distribuido
 
@@ -66,6 +69,7 @@ Por padrao, os nos usam `localhost` nas portas:
 | 3 | 5003 |
 
 O no 3 inicia como lider. Se ele for encerrado, os outros nos detectam a falha por heartbeat e iniciam a eleicao Bully.
+Depois que o novo lider assume, ele solicita as matrizes de feromonio dos participantes sobreviventes, aguarda respostas por ate 3 segundos, calcula a media elemento a elemento e substitui sua matriz local pelo estado recuperado antes de continuar a execucao normal.
 
 Para parar um no, use `Ctrl+C` no terminal correspondente.
 
@@ -83,6 +87,7 @@ src/
 doc/
   aco.md
   coordenacao.md
+  recuperacao.md
   rede.md
   no.md
   instancia.md
@@ -95,5 +100,6 @@ A explicacao detalhada de cada modulo esta na pasta `doc/`.
 - `doc/aco.md`: funcionamento do ACO.
 - `doc/rede.md`: camada de comunicacao TCP.
 - `doc/coordenacao.md`: Lamport e Bully.
+- `doc/recuperacao.md`: recuperacao de estado apos falha do lider.
 - `doc/no.md`: integracao do no distribuido.
 - `doc/instancia.md`: dados da instancia usada.

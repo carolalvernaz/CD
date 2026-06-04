@@ -23,6 +23,7 @@ MAX_SYNCS_SEM_MELHORA = 25
 MAX_ITERACOES = 2000000
 NUM_FORMIGAS = 5
 TIMEOUT_SYNC = 3
+TIMEOUT_RECUPERACAO = 3
 
 
 def validar_argumentos():
@@ -56,6 +57,8 @@ membros = MembrosGrupo(MEU_ID)
 
 feromonios_recebidos = {}
 melhores_recebidos = {}
+feromonios_recuperacao_recebidos = {}
+recuperando_estado = False
 
 rodando = True
 inicio_execucao = time.time()
@@ -134,7 +137,7 @@ def verificar_lider_morto():
     iniciar_eleicao()
 
 
-def assumir_lider():
+def assumir_lider(executar_recuperacao=False):
     ja_era_lider = eu_sou_lider()
 
     membros.adicionar(MEU_ID)
@@ -151,6 +154,9 @@ def assumir_lider():
 
     if not ja_era_lider:
         print(f"[ELEI] No {MEU_ID} assumiu como lider. Participantes: {membros.listar()}")
+
+    if executar_recuperacao or not ja_era_lider:
+        recuperar_estado_pos_falha()
 
 
 def aceitar_lider(lider_id):
@@ -228,7 +234,7 @@ def iniciar_eleicao():
 
 def verificar_eleicao():
     if eleicao.verificar_timeout_ok():
-        assumir_lider()
+        assumir_lider(executar_recuperacao=True)
 
 
 def formatar_matriz(matriz):
@@ -364,6 +370,31 @@ def processar_solicitacao(rem):
     enviar(rem, "FEROMONIO", aco.exportar_estado())
 
 
+def processar_recuperacao_solicitacao(rem):
+    if rem != lider_atual():
+        print(f"[RECUP] Ignorando solicitacao de no {rem}; lider atual: {lider_atual()}.")
+        return
+
+    enviar(rem, "RECUPERACAO_ESTADO", aco.exportar_estado())
+
+
+def processar_recuperacao_estado(rem, conteudo):
+    matriz = conteudo.get("matriz")
+
+    if matriz is None:
+        return
+
+    if not eu_sou_lider():
+        print(f"[RECUP] Ignorando estado de no {rem}; eu nao sou lider.")
+        return
+
+    if not recuperando_estado:
+        print(f"[RECUP] Ignorando estado atrasado de no {rem}; sem recuperacao ativa.")
+        return
+
+    feromonios_recuperacao_recebidos[rem] = matriz
+
+
 def processar_feromonio(rem, conteudo):
     matriz = conteudo.get("matriz")
 
@@ -428,6 +459,12 @@ def processar_mensagem(msg):
 
     elif tipo == "SOLICITACAO":
         processar_solicitacao(rem)
+
+    elif tipo == "RECUPERACAO_SOLICITACAO":
+        processar_recuperacao_solicitacao(rem)
+
+    elif tipo == "RECUPERACAO_ESTADO":
+        processar_recuperacao_estado(rem, conteudo)
 
     elif tipo == "FEROMONIO":
         processar_feromonio(rem, conteudo)
@@ -550,6 +587,80 @@ def remover_workers_sem_resposta(workers_contatados):
         if worker not in feromonios_recebidos:
             membros.remover(worker)
             print(f"[MEMB] No {worker} removido do grupo: nao respondeu ao sync.")
+
+
+def solicitar_estados_recuperacao(workers):
+    workers_contatados = []
+
+    for worker in workers:
+        if enviar(worker, "RECUPERACAO_SOLICITACAO", {}):
+            workers_contatados.append(worker)
+        else:
+            membros.remover(worker)
+            print(f"[MEMB] No {worker} removido do grupo: falha na recuperacao.")
+
+    return workers_contatados
+
+
+def aguardar_estados_recuperacao(workers_contatados):
+    prazo = time.time() + TIMEOUT_RECUPERACAO
+
+    while time.time() < prazo and rodando:
+        msg = rede.receber_proxima()
+
+        if msg:
+            relogio.ao_receber(msg["timestamp_lamport"])
+            processar_mensagem(msg)
+            continue
+
+        if all(worker in feromonios_recuperacao_recebidos for worker in workers_contatados):
+            break
+
+        time.sleep(0.1)
+
+
+def remover_workers_sem_recuperacao(workers_contatados):
+    for worker in workers_contatados:
+        if worker not in feromonios_recuperacao_recebidos:
+            membros.remover(worker)
+            print(f"[MEMB] No {worker} removido do grupo: nao respondeu a recuperacao.")
+
+
+def recuperar_estado_pos_falha():
+    global recuperando_estado
+
+    workers = membros.workers()
+
+    if not workers:
+        return
+
+    feromonios_recuperacao_recebidos.clear()
+    recuperando_estado = True
+
+    print(
+        f"[RECUP] Lider {MEU_ID} iniciando recuperacao de estado "
+        f"com {len(workers)} participante(s)."
+    )
+
+    workers_contatados = solicitar_estados_recuperacao(workers)
+    aguardar_estados_recuperacao(workers_contatados)
+    recuperando_estado = False
+
+    if not eu_sou_lider():
+        print("[RECUP] Recuperacao cancelada: no deixou de ser lider.")
+        return
+
+    remover_workers_sem_recuperacao(workers_contatados)
+
+    matrizes = [aco.obter_feromonio()] + list(feromonios_recuperacao_recebidos.values())
+    matriz_recuperada = ACO.consolidar_matrizes(matrizes)
+
+    aco.substituir_feromonio(matriz_recuperada)
+
+    print(
+        f"[RECUP] Estado recuperado com {len(feromonios_recuperacao_recebidos)} "
+        f"resposta(s). Matriz local do lider substituida."
+    )
 
 
 def sincronizar(iteracao):
