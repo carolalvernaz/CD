@@ -23,17 +23,21 @@ MAX_SYNCS_SEM_MELHORA = 25
 MAX_ITERACOES = 2000000
 NUM_FORMIGAS = 5
 TIMEOUT_SYNC = 3
+ITERACOES_BENCHMARK = 100
 
 
 def validar_argumentos():
-    if len(sys.argv) != 2:
+    argumentos = sys.argv[1:]
+
+    if not 1 <= len(argumentos) <= 2:
         ids_validos = ", ".join(str(no_id) for no_id in NOS)
         print("Uso: python src\\no.py <id_do_no>")
+        print("Opcional: acrescente --benchmark para executar 100 iteracoes.")
         print(f"IDs validos: {ids_validos}")
         sys.exit(1)
 
     try:
-        meu_id = int(sys.argv[1])
+        meu_id = int(argumentos[0])
     except ValueError:
         print("O ID do no deve ser um numero inteiro.")
         sys.exit(1)
@@ -43,10 +47,19 @@ def validar_argumentos():
         print(f"ID invalido: {meu_id}. IDs validos: {ids_validos}")
         sys.exit(1)
 
-    return meu_id
+    modo_benchmark = False
+
+    if len(argumentos) == 2:
+        if argumentos[1] != "--benchmark":
+            print("Segundo argumento invalido. Use apenas --benchmark.")
+            sys.exit(1)
+
+        modo_benchmark = True
+
+    return meu_id, modo_benchmark
 
 
-MEU_ID = validar_argumentos()
+MEU_ID, MODO_BENCHMARK = validar_argumentos()
 
 rede = Rede(MEU_ID, NOS[MEU_ID][1], NOS)
 aco = ACO(DISTANCIAS)
@@ -58,7 +71,7 @@ feromonios_recebidos = {}
 melhores_recebidos = {}
 
 rodando = True
-inicio_execucao = time.time()
+inicio_execucao = time.perf_counter()
 ultimo_contato_lider = time.time()
 
 melhor_distancia_observada = float("inf")
@@ -152,6 +165,8 @@ def assumir_lider():
     if not ja_era_lider:
         print(f"[ELEI] No {MEU_ID} assumiu como lider. Participantes: {membros.listar()}")
 
+        recuperar_estado_pos_falha()
+
 
 def aceitar_lider(lider_id):
     global ultimo_contato_lider
@@ -243,6 +258,8 @@ def imprimir_resultado_final(resultado):
     print(f"No: {MEU_ID}")
     print(f"Motivo da parada: {resultado['motivo']}")
     print(f"Iteracao final do lider: {resultado['iteracao']}")
+    if "tempo_total" in resultado:
+        print(f"Tempo total de execucao: {resultado['tempo_total']:.2f}s")
     print(f"Melhor distancia global: {resultado['melhor_distancia']:.2f}")
     print(f"Melhor rota global: {formatar_rota(resultado['melhor_rota'])}")
     print("\nMatriz final de feromonio:")
@@ -282,6 +299,101 @@ def processar_join_ack(rem, conteudo):
 
     if lider_id != MEU_ID:
         enviar(lider_id, "REGISTER", {})
+
+
+def processar_recuperacao(rem, conteudo):
+    lider_solicitante = conteudo.get("lider_id")
+
+    if lider_solicitante != rem:
+        return
+
+    enviar(rem, "RECUPERACAO_RESPOSTA", aco.exportar_estado())
+
+
+def processar_recuperacao_resposta(rem, conteudo):
+    if not eu_sou_lider():
+        return
+
+    matriz = conteudo.get("matriz")
+
+    if matriz is None:
+        return
+
+    feromonios_recebidos[rem] = matriz
+    melhores_recebidos[rem] = {
+        "rota": conteudo.get("melhor_rota", []),
+        "distancia": conteudo.get("melhor_distancia", float("inf")),
+    }
+
+
+def aguardar_recuperacao(workers_contatados):
+    prazo = time.time() + TIMEOUT_SYNC
+
+    while time.time() < prazo and rodando:
+        msg = rede.receber_proxima()
+
+        if msg:
+            relogio.ao_receber(msg["timestamp_lamport"])
+            processar_mensagem(msg)
+            continue
+
+        if all(worker in feromonios_recebidos for worker in workers_contatados):
+            break
+
+        time.sleep(0.1)
+
+
+def recuperar_estado_pos_falha():
+    if not eu_sou_lider():
+        return
+
+    workers = membros.workers()
+
+    if not workers:
+        return
+
+    print(f"[REC] Lider {MEU_ID} solicitando estados para recuperacao.")
+
+    feromonios_recebidos.clear()
+    melhores_recebidos.clear()
+
+    workers_contatados = []
+
+    for worker in workers:
+        if enviar(worker, "RECUPERACAO", {"lider_id": MEU_ID}):
+            workers_contatados.append(worker)
+        else:
+            membros.remover(worker)
+            print(f"[MEMB] No {worker} removido do grupo: falha ao solicitar recuperacao.")
+
+    aguardar_recuperacao(workers_contatados)
+
+    for worker in workers_contatados:
+        if worker not in feromonios_recebidos:
+            membros.remover(worker)
+            print(f"[MEMB] No {worker} removido do grupo: nao respondeu a recuperacao.")
+
+    workers_ativos = [
+        worker
+        for worker in workers_contatados
+        if worker in feromonios_recebidos
+    ]
+
+    matrizes = list(feromonios_recebidos.values()) + [aco.obter_feromonio()]
+    media = ACO.consolidar_matrizes(matrizes)
+
+    aco.definir_feromonio(media)
+    atualizar_criterio_parada()
+
+    for worker in workers_ativos:
+        enviar(worker, "FEROMONIO", {
+            "matriz": media,
+        })
+
+    print(
+        f"[REC] Estado consolidado com {len(workers_ativos)} worker(s). "
+        f"Participantes: {membros.listar()}"
+    )
 
 
 def processar_register(rem):
@@ -379,7 +491,7 @@ def processar_feromonio(rem, conteudo):
         return
 
     if rem == lider_atual():
-        aco.aplicar_feromonio_externo(matriz)
+        aco.definir_feromonio(matriz)
         print(f"[SYNC] Feromonio consolidado recebido do lider {rem} e aplicado.")
         return
 
@@ -393,7 +505,7 @@ def processar_parar(rem, conteudo):
         print(f"[SYNC] Ignorando PARAR de no {rem}; lider atual: {lider_atual()}.")
         return
 
-    aco.aplicar_feromonio_externo(conteudo["matriz_feromonio"])
+    aco.definir_feromonio(conteudo["matriz_feromonio"])
     imprimir_resultado_final(conteudo)
     rodando = False
 
@@ -428,6 +540,12 @@ def processar_mensagem(msg):
 
     elif tipo == "SOLICITACAO":
         processar_solicitacao(rem)
+
+    elif tipo == "RECUPERACAO":
+        processar_recuperacao(rem, conteudo)
+
+    elif tipo == "RECUPERACAO_RESPOSTA":
+        processar_recuperacao_resposta(rem, conteudo)
 
     elif tipo == "FEROMONIO":
         processar_feromonio(rem, conteudo)
@@ -503,7 +621,13 @@ def atualizar_criterio_parada():
 
 
 def verificar_parada(iteracao):
-    if time.time() - inicio_execucao < TEMPO_MINIMO_ANTES_PARAR:
+    if MODO_BENCHMARK:
+        if iteracao >= ITERACOES_BENCHMARK:
+            return True, f"benchmark de {ITERACOES_BENCHMARK} iteracoes concluido"
+
+        return False, ""
+
+    if time.perf_counter() - inicio_execucao < TEMPO_MINIMO_ANTES_PARAR:
         return False, ""
 
     if iteracao >= MAX_ITERACOES:
@@ -576,7 +700,7 @@ def sincronizar(iteracao):
     matrizes = list(feromonios_recebidos.values()) + [aco.obter_feromonio()]
     media = ACO.consolidar_matrizes(matrizes)
 
-    aco.aplicar_feromonio_externo(media)
+    aco.definir_feromonio(media)
 
     for worker in workers_ativos:
         enviar(worker, "FEROMONIO", {
@@ -594,12 +718,16 @@ def sincronizar(iteracao):
     parar, motivo = verificar_parada(iteracao)
 
     if parar:
+        tempo_total = time.perf_counter() - inicio_execucao
+
         resultado = {
             "motivo": motivo,
             "iteracao": iteracao,
             "melhor_rota": melhor_rota_observada,
             "melhor_distancia": melhor_distancia_observada,
             "matriz_feromonio": media,
+            "tempo_total": tempo_total,
+            "modo": "benchmark" if MODO_BENCHMARK else "distribuido",
         }
 
         for worker in workers_ativos:

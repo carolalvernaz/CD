@@ -64,6 +64,19 @@ class ACO:
                         self.feromonio[i][j] + matriz_externa[i][j]
                     ) / 2
 
+    def definir_feromonio(self, matriz_nova: list[list[float]]) -> None:
+        self._validar_matriz_generica(matriz_nova, "matriz_nova")
+
+        if len(matriz_nova) != self.quantidade_cidades:
+            raise ValueError(
+                "A matriz de feromônio precisa ter o mesmo tamanho da instância."
+            )
+
+        self.feromonio = [linha[:] for linha in matriz_nova]
+
+        for i in range(self.quantidade_cidades):
+            self.feromonio[i][i] = 0.0
+
     def obter_melhor_global(self) -> tuple[list, float]:
         if self.melhor_rota_global is None:
             return [], inf

@@ -29,6 +29,33 @@ python src\testes\teste_aco.py
 
 O teste `teste_bully.py` abre portas locais e pode levar alguns segundos, porque simula queda de nos e aguarda a eleicao de novo lider.
 
+## Baseline centralizado e telemetria
+
+Para executar a versao centralizada usada na comparacao de desempenho:
+
+```powershell
+$env:PYTHONUTF8='1'
+python src\aco_centralizado.py --iteracoes 100 --formigas 5
+```
+
+Se quiser calcular speedup e eficiencia a partir de uma execucao distribuida, informe o tempo total medido e a quantidade de nos:
+
+```powershell
+$env:PYTHONUTF8='1'
+python src\aco_centralizado.py --iteracoes 100 --formigas 5 --tempo-distribuido 12.34 --nos-distribuidos 5 --csv resultados.csv
+```
+
+## Modo benchmark da versao distribuida
+
+Para rodar a versao distribuida com parada apos 100 iteracoes, use o parametro `--benchmark` em cada no:
+
+```powershell
+$env:PYTHONUTF8='1'
+python src\no.py 1 --benchmark
+python src\no.py 2 --benchmark
+python src\no.py 3 --benchmark
+```
+
 ## Como rodar o sistema distribuido
 
 Abra 3 terminais PowerShell na pasta do projeto. Em cada terminal, execute um no diferente.
