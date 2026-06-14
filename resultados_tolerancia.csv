@@ -1,0 +1,16 @@
+cenario,execucao,lider_morto,momento_falha,tempo_recuperacao,eleicao_correta,busca_continuou
+inicio,1,5,5,14.43,True,True
+inicio,2,5,5,15.03,True,True
+inicio,3,5,5,11.12,True,True
+inicio,4,5,5,12.35,True,True
+inicio,5,5,5,15.03,True,True
+meio,1,5,20,12.93,True,True
+meio,2,5,20,13.23,True,True
+meio,3,5,20,15.03,True,True
+meio,4,5,20,13.23,True,True
+meio,5,5,20,14.73,True,True
+fim,1,5,45,12.93,True,True
+fim,2,5,45,13.83,True,True
+fim,3,5,45,12.33,True,True
+fim,4,5,45,12.03,True,True
+fim,5,5,45,14.13,True,True
