@@ -1,16 +1,34 @@
-# Programa Principal do Nó Distribuído(no.py)
+# Programa Principal do Nó Distribuído (no.py)
 
 ## O que é este arquivo
 
-`no.py` é o programa principal de cada nó do sistema distribuído de ACO. Ele é o integrador: importa todos os módulos (`rede.py`, `aco.py`, `coordenacao.py`, `instancia.py`) e os conecta em um único loop de execução contínua.
+`no.py` é o programa principal de cada nó do sistema distribuído de ACO. Ele é o integrador: importa todos os módulos (`rede.py`, `aco.py`, `coordenacao.py`, `data/instancia.py`) e os conecta em um único loop de execução contínua.
 
-Cada nó do sistema é um processo Python independente iniciado com:
+Cada nó é um processo Python independente:
 
 ```bash
+python no.py 5   # Nó 5 — porta 5005
+python no.py 4   # Nó 4 — porta 5004
+...
 python no.py 1   # Nó 1 — porta 5001
-python no.py 2   # Nó 2 — porta 5002
-python no.py 3   # Nó 3 — porta 5003
 ```
+
+Opcionalmente, `--benchmark` faz o nó parar após 100 iterações (usado nos experimentos comparativos):
+
+```bash
+python no.py 1 --benchmark
+```
+
+---
+
+## Visão geral do design
+
+A versão final do sistema tem três características que vale destacar logo de início, porque mudaram em relação a versões anteriores do projeto:
+
+1. **Cinco nós.** O dicionário `NOS` define 5 nós (IDs 1 a 5, portas 5001–5005).
+2. **Loop único, sem thread de heartbeat dedicada.** Todo o trabalho do nó (processar mensagens, detectar falha do líder, executar ACO, sincronizar) acontece no **loop principal**. A única thread paralela é o servidor TCP interno de `rede.py`. Não há mais `loop_heartbeat` nem `_eleicao_inicial`.
+3. **Detecção de falha passiva (sem mensagem de HEARTBEAT).** A vivacidade do líder é inferida do tráfego normal: sempre que chega uma mensagem do líder atual (tipicamente as `SOLICITACAO`/`FEROMONIO` das sincronizações periódicas), o nó atualiza o relógio `ultimo_contato_lider`. Se passar tempo demais sem nenhum contato, o líder é considerado morto.
+4. **Grupo dinâmico.** Os participantes ativos são rastreados por `MembrosGrupo`. Nós entram por um protocolo de JOIN/REGISTER e são removidos quando não respondem.
 
 ---
 
@@ -20,22 +38,41 @@ python no.py 3   # Nó 3 — porta 5003
 |---|---|---|
 | `rede.py` | interno | Comunicação TCP entre nós |
 | `aco.py` | interno | Algoritmo de otimização local |
-| `coordenacao.py` | interno | Relógio de Lamport e eleição de líder |
-| `data/instancia.py` | interno | Matriz de distâncias do TSP |
-| `sys` | padrão Python | Leitura do ID do nó via argumento |
-| `time` | padrão Python | Controle de timing e sleeps |
-| `threading` | padrão Python | Threads de heartbeat e eleição inicial |
+| `coordenacao.py` | interno | Relógio de Lamport, eleição Bully e `MembrosGrupo` |
+| `data/instancia.py` | interno | Matriz de distâncias do TSP e formatação de rota |
+| `sys` | padrão Python | Leitura dos argumentos de linha de comando |
+| `time` | padrão Python | Timeouts, medição de duração e pausas |
 
 ---
 
-## Configuração inicial
+## Configuração
 
 ```python
-MEU_ID = int(sys.argv[1])
-NOS = {1: ('localhost', 5001), 2: ('localhost', 5002), 3: ('localhost', 5003)}
+NOS = {
+    1: ("localhost", 5001),
+    2: ("localhost", 5002),
+    3: ("localhost", 5003),
+    4: ("localhost", 5004),
+    5: ("localhost", 5005),
+}
 ```
 
-O ID do nó é lido do argumento de linha de comando. O dicionário `NOS` mapeia cada ID ao seu endereço e porta TCP. Para rodar em máquinas diferentes, basta substituir `'localhost'` pelos IPs reais.
+Para rodar em máquinas diferentes, basta substituir `"localhost"` pelos IPs reais.
+
+### Constantes principais
+
+| Constante | Valor | Descrição |
+|---|---:|---|
+| `TIMEOUT_LIDER_MORTO` | `8` | Segundos sem contato do líder antes de iniciar nova eleição |
+| `INTERVALO_SYNC` | `100` | A cada quantas iterações o líder sincroniza o feromônio |
+| `JANELA_RESPOSTA_JOIN` | `0.3` | Tempo de espera por resposta ao procurar um grupo existente |
+| `TEMPO_MINIMO_ANTES_PARAR` | `30` | Tempo mínimo de execução antes de qualquer parada (modo normal) |
+| `MIN_ITERACOES` | `1000000` | Iterações mínimas antes de a estabilização poder parar a busca |
+| `MAX_SYNCS_SEM_MELHORA` | `25` | Sincronizações seguidas sem melhora que caracterizam estabilização |
+| `MAX_ITERACOES` | `2000000` | Limite máximo de iterações (modo normal) |
+| `NUM_FORMIGAS` | `5` | Formigas por iteração |
+| `TIMEOUT_SYNC` | `3` | Janela máxima (s) de espera por respostas de feromônio/recuperação |
+| `ITERACOES_BENCHMARK` | `100` | Iterações no modo `--benchmark` |
 
 ---
 
@@ -46,268 +83,175 @@ rede    = Rede(MEU_ID, NOS[MEU_ID][1], NOS)
 aco     = ACO(DISTANCIAS)
 relogio = RelogioLamport()
 eleicao = EleicaoLider(MEU_ID, list(NOS.keys()))
+membros = MembrosGrupo(MEU_ID)
 ```
 
-Cada nó cria suas próprias instâncias locais de todos os módulos. Eles não compartilham estado entre si — a distribuição acontece apenas pela troca de mensagens pela rede.
+Cada nó cria suas próprias instâncias locais. Eles não compartilham estado — a distribuição acontece apenas pela troca de mensagens.
+
+### Variáveis globais
+
+```python
+feromonios_recebidos = {}      # matrizes recebidas dos workers (sync/recuperação)
+melhores_recebidos   = {}      # melhor rota/distância recebida de cada worker
+rodando              = True    # controla o loop principal
+inicio_execucao      = ...     # marca de tempo do início (perf_counter)
+ultimo_contato_lider = ...     # marca de tempo do último contato com o líder
+melhor_distancia_observada / melhor_rota_observada / syncs_sem_melhora
+```
 
 ---
 
-## Variáveis globais
+## Protocolo de mensagens
 
-```python
-feromonios_recebidos = {}   # armazena matrizes recebidas dos workers durante sincronização
-falhas_lider = 0            # contador de heartbeats sem resposta
-```
+Toda mensagem tem `tipo`, `remetente_id`, `timestamp_lamport` e `conteudo` (ver `doc/rede.md`).
 
----
+| Tipo | Quem envia | Significado |
+|---|---|---|
+| `JOIN` | Nó entrando | "Existe algum grupo? Quem é o líder?" |
+| `JOIN_ACK` | Quem conhece o líder | Informa o `lider_id` ao recém-chegado |
+| `REGISTER` | Nó entrando | Pede ao líder para entrar oficialmente no grupo |
+| `REGISTER_ACK` | Líder | Confirma o registro e devolve a lista de `participantes` |
+| `ELEICAO` | Qualquer nó | Inicia/propaga uma eleição Bully para os IDs maiores |
+| `OK` | Nó de ID maior | "Recebi sua eleição; eu assumo a partir daqui" |
+| `LIDER` | Novo líder | Anuncia liderança e envia a lista de `participantes` |
+| `SOLICITACAO` | Líder | Pede a cada worker sua matriz de feromônio (sincronização) |
+| `FEROMONIO` | Worker → líder / líder → workers | Worker envia sua matriz; líder redistribui a média consolidada |
+| `RECUPERACAO` | Novo líder | Após assumir, pede o estado salvo de cada worker |
+| `RECUPERACAO_RESPOSTA` | Worker | Envia seu estado (`exportar_estado`) ao líder em recuperação |
+| `PARAR` | Líder | Sinaliza fim da busca e envia o resultado final |
 
-## Funções
-
-### `enviar(destino_id, tipo, conteudo={})`
-
-Monta e envia uma mensagem para um nó específico.
-
-```python
-def enviar(destino_id, tipo, conteudo={}):
-    msg = {
-        "tipo": tipo,
-        "remetente_id": MEU_ID,
-        "timestamp_lamport": relogio.antes_de_enviar(),
-        "conteudo": conteudo,
-    }
-    return rede.enviar_mensagem(destino_id, msg)
-```
-
-**Detalhe importante:** chama `relogio.antes_de_enviar()` antes de enviar, incrementando o contador lógico e carimbando a mensagem com o timestamp atual. Retorna `True` se o envio foi bem-sucedido, `False` se o nó de destino estava offline.
+O roteamento é feito em `processar_mensagem(msg)`, que primeiro chama `registrar_contato_lider(rem)` e depois despacha por `tipo`.
 
 ---
 
-### `broadcast(tipo, conteudo={})`
-
-Envia a mesma mensagem para todos os nós conhecidos, exceto si mesmo.
-
-```python
-def broadcast(tipo, conteudo={}):
-    msg = {
-        "tipo": tipo,
-        "remetente_id": MEU_ID,
-        "timestamp_lamport": relogio.antes_de_enviar(),
-        "conteudo": conteudo,
-    }
-    rede.broadcast(msg)
-```
-
-Usado para anunciar liderança (`LIDER`), solicitar feromônio (`SOLICITACAO`) e redistribuir feromônio consolidado (`FEROMONIO`).
-
----
-
-### `iniciar_eleicao()`
-
-Inicia o processo de eleição pelo algoritmo Bully.
-
-```python
-def iniciar_eleicao():
-    global falhas_lider
-    falhas_lider = 0
-
-    eleicao.resetar_lider()         # limpa estado preso de eleição anterior
-    mensagens = eleicao.iniciar_eleicao()
-
-    if not mensagens:
-        # sem nós com ID maior — declara-se líder imediatamente
-        eleicao.ao_receber_lider(MEU_ID)
-        broadcast("LIDER", {"lider_id": MEU_ID})
-        print(f"[ELEI] Nó {MEU_ID} venceu a eleição (sem nós maiores).")
-        return
-
-    for m in mensagens:
-        enviar(m["destino_id"], "ELEICAO", m["conteudo"])
-```
-
-**Por que `resetar_lider()` antes de `iniciar_eleicao()`?**  
-Se uma eleição anterior ficou com estado inconsistente (por exemplo, `_em_eleicao = True` de uma tentativa anterior), `iniciar_eleicao()` retornaria lista vazia sem fazer nada. O `resetar_lider()` limpa esse estado, permitindo que a nova eleição comece do zero.
-
-**Por que verificar lista vazia?**  
-Quando o nó que inicia a eleição já é o de maior ID entre os vivos, não há ninguém para enviar `ELEICAO`. Nesse caso, ele se declara líder imediatamente sem precisar aguardar o timeout de 2 segundos.
-
----
-
-### `processar_mensagem(msg)`
-
-Roteia cada mensagem recebida para o tratamento correto conforme o tipo.
-
-```python
-def processar_mensagem(msg):
-    global falhas_lider
-    tipo = msg["tipo"]
-    rem  = msg["remetente_id"]
-```
-
-#### Tipos tratados:
-
-| Tipo | O que faz |
-|---|---|
-| `ELEICAO` | Responde OK ao remetente e propaga eleição para nós maiores |
-| `OK` | Registra que um nó maior respondeu — para de se considerar candidato |
-| `LIDER` | Atualiza o líder conhecido e reseta contador de falhas |
-| `SOLICITACAO` | Se não for líder, envia sua matriz de feromônio ao líder |
-| `FEROMONIO` | Se for líder, armazena a matriz recebida; se não, aplica externamente |
-| `HEARTBEAT` | Responde com `HEARTBEAT_ACK` ao remetente |
-| `HEARTBEAT_ACK` | Reseta o contador de falhas do líder |
-
-#### Tratamento de `ELEICAO`:
-
-```python
-if tipo == "ELEICAO":
-    resultado = eleicao.ao_receber_eleicao(rem)
-    ok = resultado["ok"]
-    enviar(ok["destino_id"], "OK", ok["conteudo"])
-    for m in resultado["eleicao"]:
-        enviar(m["destino_id"], "ELEICAO", m["conteudo"])
-```
-
-`ao_receber_eleicao()` retorna dois elementos: a mensagem OK para enviar de volta ao remetente, e a lista de mensagens ELEICAO para propagar aos nós com ID ainda maior.
-
-#### Tratamento de `FEROMONIO`:
-
-```python
-elif tipo == "FEROMONIO":
-    matriz = msg["conteudo"].get("matriz")
-    if eleicao.eu_sou_lider():
-        feromonios_recebidos[rem] = matriz   # coleta para consolidação
-    else:
-        aco.aplicar_feromonio_externo(matriz) # aplica feromônio consolidado
-```
-
-A mesma mensagem `FEROMONIO` tem dois significados dependendo de quem recebe: o líder a usa para coletar matrizes dos workers; os workers a usam para aplicar o feromônio consolidado que o líder redistribuiu.
-
----
-
-### `verificar_eleicao()`
-
-Verifica se algum timeout da eleição expirou e declara vencedor se necessário.
-
-```python
-def verificar_eleicao():
-    mensagens = eleicao.verificar_timeout_ok()
-    for m in mensagens:
-        enviar(m["destino_id"], "LIDER", m["conteudo"])
-    if mensagens:
-        print(f"[ELEI] Nó {MEU_ID} venceu a eleição.")
-```
-
-Chamada a cada ciclo do loop principal. `verificar_timeout_ok()` retorna lista não vazia apenas quando um dos dois timeouts expirou:
-- **TIMEOUT_OK (2s):** nenhum nó maior respondeu com OK
-- **TIMEOUT_LIDER (5s):** recebeu OK mas nenhum nó anunciou LIDER
-
----
-
-### `sincronizar()`
-
-Executada pelo líder a cada 10 iterações para consolidar e redistribuir o feromônio.
-
-```python
-def sincronizar():
-    feromonios_recebidos.clear()
-    broadcast("SOLICITACAO")
-
-    workers = [n for n in NOS if n != MEU_ID]
-    prazo = time.time() + 3
-    while time.time() < prazo:
-        if all(w in feromonios_recebidos for w in workers):
-            break
-        time.sleep(0.1)
-
-    matrizes = list(feromonios_recebidos.values()) + [aco.obter_feromonio()]
-    n = len(matrizes)
-    tamanho = len(matrizes[0])
-    media = [[sum(m[i][j] for m in matrizes) / n
-              for j in range(tamanho)]
-              for i in range(tamanho)]
-
-    aco.aplicar_feromonio_externo(media)
-    broadcast("FEROMONIO", {"matriz": media})
-    print("[SYNC] Feromônio sincronizado.")
-```
-
-**Fluxo completo:**
-1. Limpa matrizes recebidas anteriormente
-2. Envia `SOLICITACAO` em broadcast para os workers
-3. Aguarda respostas por até 3 segundos (timeout para não travar)
-4. Calcula a média elemento a elemento de todas as matrizes recebidas + a própria
-5. Aplica a média localmente
-6. Redistribui via `FEROMONIO` em broadcast
-
-**Por que incluir a própria matriz na média?**  
-O líder também executa formigas localmente. Ignorar sua própria matriz descartaria o aprendizado acumulado localmente pelo nó líder.
-
----
-
-### `loop_heartbeat()`
-
-Roda em thread daemon, verificando a disponibilidade do líder a cada 5 segundos.
-
-```python
-def loop_heartbeat():
-    global falhas_lider
-    while True:
-        time.sleep(5)
-        lider = eleicao.obter_lider()
-        if lider and lider != MEU_ID:
-            ok = enviar(lider, "HEARTBEAT")
-            if not ok:
-                falhas_lider += 1
-                print(f"[HB] Líder {lider} falhou ({falhas_lider}/3)")
-                if falhas_lider >= 3:
-                    iniciar_eleicao()
-            else:
-                falhas_lider = 0
-```
-
-**Por que só envia se `lider != MEU_ID`?**  
-O líder não envia heartbeat para si mesmo — ele só responde heartbeats recebidos dos workers.
-
-**Por que 3 falhas consecutivas?**  
-Uma única falha pode ser ruído de rede. Três falhas consecutivas (≈15 segundos) indicam com mais confiança que o líder está realmente inativo.
-
----
-
-### `_eleicao_inicial()`
-
-Roda em thread daemon, garantindo que o nó tenha um líder após a inicialização.
-
-```python
-def _eleicao_inicial():
-    time.sleep(3)
-    if eleicao.obter_lider() is None:
-        print(f"[INIT] Nó {MEU_ID} sem líder, iniciando eleição...")
-        iniciar_eleicao()
-```
-
-**Por que essa função existe?**  
-Se os nós forem iniciados em ordem diferente de 3 → 2 → 1, o broadcast inicial do Nó 3 pode ocorrer antes dos outros estarem prontos para receber. Essa thread garante que, independentemente da ordem de inicialização, qualquer nó sem líder após 3 segundos inicia uma eleição automaticamente.
-
----
-
-## Bloco de inicialização
+## Entrada no grupo (inicialização)
 
 ```python
 rede.iniciar_servidor()
-if MEU_ID == max(NOS.keys()):
-    eleicao.ao_receber_lider(MEU_ID)
-    print(f"[INIT] Nó {MEU_ID} inicia como líder.")
-    time.sleep(1)
-    broadcast("LIDER", {"lider_id": MEU_ID})
-
-threading.Thread(target=_eleicao_inicial, daemon=True).start()
-threading.Thread(target=loop_heartbeat, daemon=True).start()
+print(f"[INIT] No {MEU_ID} iniciado.")
+tentar_entrar_em_grupo()
 ```
 
-**Sequência:**
-1. Sobe o servidor TCP em background
-2. Se for o nó de maior ID (Nó 3), declara-se líder e aguarda 1 segundo para que os outros nós estejam prontos antes de fazer o broadcast
-3. Dispara a thread de eleição inicial (verifica após 3s se há líder)
-4. Dispara a thread de heartbeat (roda indefinidamente)
+### `tentar_entrar_em_grupo()`
+
+1. Envia `JOIN` para cada outro nó conhecido.
+2. Após cada `JOIN`, processa as mensagens pendentes por `JANELA_RESPOSTA_JOIN` segundos.
+3. Se descobrir um líder durante esse processo, para de procurar.
+4. Se **nenhum** líder for encontrado após tentar todos, o nó **se declara líder** com `assumir_lider()`.
+
+Esse mecanismo substitui a antiga regra de "o nó de maior ID começa como líder": agora a liderança inicial depende de quem já está no ar, e a eleição Bully corrige qualquer inconsistência (um nó de ID menor que assumiu por chegar primeiro será desafiado quando um ID maior aparecer).
+
+### `processar_join`, `processar_join_ack`, `processar_register`, `processar_register_ack`
+
+- `processar_join` — se eu sei quem é o líder, respondo `JOIN_ACK` com o `lider_id`.
+- `processar_join_ack` — aprendo o líder, e se não sou eu, envio `REGISTER` ao líder.
+- `processar_register` — o **líder** adiciona o remetente ao grupo e responde `REGISTER_ACK` com a lista de participantes.
+- `processar_register_ack` — o nó registra todos os participantes; se descobre que tem ID maior que o líder, inicia eleição.
+
+---
+
+## Eleição de líder (Bully)
+
+### `verificar_lider_morto()`
+
+Chamada a cada ciclo do loop principal. Se o tempo desde `ultimo_contato_lider` ultrapassa `TIMEOUT_LIDER_MORTO` (8s) — e não estou em eleição nem sou o próprio líder — então:
+
+1. removo o líder de `membros`;
+2. chamo `eleicao.resetar_lider()`;
+3. reinicio `ultimo_contato_lider`;
+4. chamo `iniciar_eleicao()`.
+
+### `iniciar_eleicao()`
+
+1. Não faz nada se eu já sou líder ou se já estou em eleição.
+2. Recria a instância de `EleicaoLider` (estado limpo) e obtém as mensagens `ELEICAO` para os IDs maiores.
+3. Tenta enviar a cada ID maior (`tentar_enviar`, silencioso).
+4. Se **nenhum** ID maior pôde ser contatado, chamo `assumir_lider()` imediatamente.
+
+### `processar_eleicao(rem)`
+
+- adiciono `rem` ao grupo;
+- se meu ID é menor ou igual ao remetente, ignoro (ele cuida);
+- se sou líder, respondo `LIDER`;
+- senão, respondo `OK` e inicio minha própria eleição.
+
+### `processar_ok` e `verificar_eleicao()`
+
+- `processar_ok` registra que um nó maior respondeu (`eleicao.ao_receber_ok`).
+- `verificar_eleicao()` (no loop) chama `eleicao.verificar_timeout_ok()`; se algum timeout expirou, eu venço e chamo `assumir_lider()`.
+
+### `assumir_lider()`
+
+1. me adiciono ao grupo e marco `ao_receber_lider(MEU_ID)`;
+2. envio `LIDER` (com a lista de participantes) a todos os workers, removendo os que falharem;
+3. se eu **ainda não era** líder, disparo a **recuperação de estado pós-falha**.
+
+### `aceitar_lider(lider_id)`
+
+Trata todos os casos de receber um anúncio de líder, garantindo coerência do Bully:
+
+- ignoro um líder de ID menor que o atual ou menor que eu (mensagem antiga/errada);
+- aceito um líder de ID maior;
+- se o líder anunciado é menor que eu, **disputo** iniciando eleição;
+- atualizo `ultimo_contato_lider` ao aceitar.
+
+---
+
+## Recuperação de estado pós-falha
+
+Quando um nó assume a liderança pela primeira vez (após a queda do líder anterior), ele reconstrói o estado global a partir do que os sobreviventes conhecem. Este é o **requisito obrigatório** da segunda entrega.
+
+### `recuperar_estado_pos_falha()`
+
+1. envia `RECUPERACAO` a cada worker conhecido (removendo do grupo os que não puderem ser contatados);
+2. aguarda respostas por até `TIMEOUT_SYNC` (3s) em `aguardar_recuperacao`;
+3. remove do grupo os workers que não responderam;
+4. consolida as matrizes recebidas + a própria com `ACO.consolidar_matrizes` (média elemento a elemento);
+5. aplica a média localmente com `aco.definir_feromonio`;
+6. atualiza o critério de parada;
+7. redistribui a matriz consolidada via `FEROMONIO` aos workers ativos.
+
+### `processar_recuperacao` / `processar_recuperacao_resposta`
+
+- um worker, ao receber `RECUPERACAO` do líder legítimo, responde com `RECUPERACAO_RESPOSTA` contendo `aco.exportar_estado()` (matriz + melhor rota + melhor distância);
+- o líder coleta cada resposta em `feromonios_recebidos` e `melhores_recebidos`.
+
+Assim, o conhecimento acumulado antes da falha (feromônio **e** melhor rota) não é perdido: o novo líder parte do estado médio dos sobreviventes em vez de recomeçar do zero.
+
+---
+
+## Sincronização periódica
+
+A cada `INTERVALO_SYNC` iterações, **se for líder**, o nó executa `sincronizar(iteracao)`:
+
+1. `solicitar_feromonios(workers)` — envia `SOLICITACAO` a cada worker; remove do grupo quem falha no envio.
+2. `aguardar_feromonios(...)` — coleta as respostas `FEROMONIO` por até `TIMEOUT_SYNC`.
+3. `remover_workers_sem_resposta(...)` — limpa do grupo quem não respondeu.
+4. consolida (`ACO.consolidar_matrizes`) a média das matrizes recebidas + a própria.
+5. aplica localmente (`definir_feromonio`) e redistribui `FEROMONIO` aos workers ativos.
+6. atualiza o critério de parada e, se ele for atingido, envia `PARAR` e encerra.
+
+> **Detalhe importante:** como as `SOLICITACAO` chegam aos workers a cada ciclo de sync, são elas que renovam o `ultimo_contato_lider` de cada worker. É assim que a vivacidade do líder é detectada sem uma mensagem de heartbeat dedicada.
+
+### `processar_solicitacao` / `processar_feromonio`
+
+- `processar_solicitacao` — só atende se vier do líder atual; responde com `exportar_estado`.
+- `processar_feromonio` — se sou líder, **coleto** a matriz do worker; se sou worker e veio do líder, **aplico** a matriz consolidada (`definir_feromonio`).
+
+---
+
+## Critério de parada
+
+### `escolher_melhor_global()` / `atualizar_criterio_parada()`
+
+Reúne a melhor rota local e as melhores recebidas dos workers, escolhe a de menor distância e atualiza `melhor_distancia_observada`/`melhor_rota_observada`. Se não houve melhora, incrementa `syncs_sem_melhora`.
+
+### `verificar_parada(iteracao)`
+
+- **Modo benchmark:** para ao atingir `ITERACOES_BENCHMARK` (100).
+- **Modo normal:** nunca para antes de `TEMPO_MINIMO_ANTES_PARAR`; para ao atingir `MAX_ITERACOES`, ou por estabilização (após `MIN_ITERACOES`, quando `syncs_sem_melhora >= MAX_SYNCS_SEM_MELHORA`).
+
+Ao parar, o líder envia `PARAR` (com o resultado consolidado) aos workers e todos imprimem o resultado final via `imprimir_resultado_final`.
 
 ---
 
@@ -315,74 +259,67 @@ threading.Thread(target=loop_heartbeat, daemon=True).start()
 
 ```python
 iteracao = 0
-while True:
+while rodando:
     msg = rede.receber_proxima()
     if msg:
         relogio.ao_receber(msg["timestamp_lamport"])
         processar_mensagem(msg)
 
+    verificar_lider_morto()
     verificar_eleicao()
 
-    aco.executar_iteracao(num_formigas=5)
+    aco.executar_iteracao(num_formigas=NUM_FORMIGAS)
     iteracao += 1
 
-    if iteracao % 10 == 0:
+    if iteracao % INTERVALO_SYNC == 0:
         _, dist = aco.obter_melhor_global()
-        print(f"[ACO] iter {iteracao} | dist {dist:.2f} | líder: {eleicao.obter_lider()}")
-
-    if iteracao % 10 == 0 and eleicao.eu_sou_lider():
-        sincronizar()
+        print(f"[ACO] iter {iteracao} | dist {dist:.2f} | lider: {lider_atual()} | ...")
+        if eu_sou_lider():
+            sincronizar(iteracao)
 
     time.sleep(0.01)
-```
 
-**A cada ciclo (≈10ms), o loop faz:**
+rede.parar()
+```
 
 | Passo | O que faz |
 |---|---|
-| 1 | Verifica se há mensagem na fila — se sim, atualiza o relógio de Lamport e processa |
-| 2 | Verifica se algum timeout de eleição expirou |
-| 3 | Executa uma iteração do ACO com 5 formigas |
-| 4 | A cada 10 iterações, imprime o estado atual |
-| 5 | A cada 10 iterações, se for líder, executa sincronização de feromônio |
+| 1 | Consome uma mensagem da fila; atualiza o Lamport **antes** de processar |
+| 2 | Verifica se o líder está morto (detecção passiva por timeout) |
+| 3 | Verifica se algum timeout de eleição expirou |
+| 4 | Executa uma iteração local do ACO |
+| 5 | A cada `INTERVALO_SYNC` iterações, imprime estado e (se líder) sincroniza |
 
-**Por que `time.sleep(0.01)`?**  
-Evita que o loop consuma 100% da CPU. 10ms é tempo suficiente para não perder mensagens importantes, pois elas ficam enfileiradas no `queue.Queue` interno do `rede.py`.
-
-**Por que o Lamport é atualizado antes de `processar_mensagem()`?**  
-A regra do Lamport exige que o relógio seja atualizado com `max(local, recebido) + 1` antes de qualquer processamento do conteúdo da mensagem. Isso garante que eventos causalmente posteriores sempre tenham timestamps maiores.
+O `time.sleep(0.01)` evita uso de 100% de CPU; mensagens não se perdem porque ficam enfileiradas na `queue.Queue` interna de `rede.py`.
 
 ---
 
-## Threads em execução simultânea
+## Threads em execução
 
 | Thread | Função | Intervalo |
 |---|---|---|
-| Loop principal | Processa mensagens, executa ACO, sincroniza | Contínuo (10ms) |
-| `loop_heartbeat` | Verifica disponibilidade do líder | A cada 5s |
-| `_eleicao_inicial` | Garante líder após inicialização | Uma vez, após 3s |
-| Servidor TCP (rede.py) | Aceita conexões e enfileira mensagens | Contínuo |
+| Loop principal | Processa mensagens, detecta falha, executa ACO, sincroniza | Contínuo (≈10ms) |
+| Servidor TCP (`rede.py`) | Aceita conexões e enfileira mensagens | Contínuo |
+
+Diferente de versões anteriores, **não há thread de heartbeat nem thread de eleição inicial** — tudo é resolvido no loop principal.
 
 ---
 
-## Fluxo completo de uma execução típica
+## Fluxo de uma execução típica com falha
 
 ```
-Nó 3 sobe → declara-se líder → broadcast LIDER
-Nós 1 e 2 sobem → recebem LIDER → atualizam lider_atual = 3
+Nós sobem em ordem 5→4→3→2→1
+  → cada nó faz JOIN, encontra o grupo e REGISTER no líder 5
+  → líder 5 sincroniza feromônio a cada 100 iterações
 
-Loop rodando:
-  → ACO executa localmente em cada nó
-  → A cada 10 iterações, Nó 3 sincroniza feromônio
-  → Workers enviam heartbeat a cada 5s para o Nó 3
-
-Nó 3 cai:
-  → Heartbeats falham 3 vezes (≈15s)
-  → Nós 1 e 2 chamam iniciar_eleicao()
-  → Nó 2 (maior ID vivo) vence após TIMEOUT_OK (2s)
-  → Nó 2 faz broadcast LIDER
-  → Nó 1 atualiza lider_atual = 2
-  → Sistema continua normalmente com Nó 2 como líder
+Nó 5 (líder) cai:
+  → workers param de receber SOLICITACAO
+  → após 8s sem contato, verificar_lider_morto() dispara
+  → Nó 4 (maior ID vivo) vence a eleição Bully e assume
+  → Nó 4 executa recuperar_estado_pos_falha():
+       pede RECUPERACAO aos sobreviventes, consolida a média,
+       redistribui o feromônio
+  → busca continua normalmente com Nó 4 como líder
 ```
 
 ---
@@ -390,17 +327,16 @@ Nó 3 cai:
 ## Saída esperada no terminal
 
 ```
-[Rede] Nó 3 escutando na porta 5003
-[INIT] Nó 3 inicia como líder.
-[ACO] iter 10 | dist 82.00 | líder: 3
-[SYNC] Feromônio sincronizado.
-[ACO] iter 20 | dist 79.00 | líder: 3
+[Rede] No 4 escutando na porta 5004
+[INIT] No 4 iniciado.
+[JOIN] No 4 procurando grupo existente.
+[ELEI] Novo lider: No 5
+[MEMB] No 4 entrou no grupo do lider 5. ...
+[ACO] iter 100 | dist 78.00 | lider: 5 | participantes: -
 ...
-[HB] Líder 3 falhou (1/3)
-[HB] Líder 3 falhou (2/3)
-[HB] Líder 3 falhou (3/3)
-[ELEI] Nó 2 venceu a eleição.
-[ELEI] Novo líder: Nó 2
-[ACO] iter 6400 | dist 73.00 | líder: 2
-[SYNC] Feromônio sincronizado.
+[ELEI] Lider 5 nao respondeu por 8.1s. Iniciando nova eleicao.
+[ELEI] No 4 assumiu como lider. Participantes: [1, 2, 3, 4]
+[REC] Lider 4 solicitando estados para recuperacao.
+[REC] Estado consolidado com 3 worker(s). Participantes: [1, 2, 3, 4]
+[SYNC] Feromonio sincronizado com 3 worker(s). melhor=72.00 no=3 ...
 ```

@@ -237,6 +237,52 @@ Ao receber OK, o nó sabe que existe alguém maior vivo — e esse alguém preci
 **Por que retornar mensagens prontas em vez de enviar diretamente?**
 `EleicaoLider` não conhece a classe `Rede` — recebe e devolve dicts, nada mais. Isso mantém o módulo testável em isolamento (sem sockets) e segue o mesmo contrato que os outros módulos expõem para `no.py`.
 
+---
+
+## Classe `MembrosGrupo`
+
+### O que resolve
+
+O sistema é dinâmico: nós entram pelo protocolo de JOIN/REGISTER e saem quando falham. Para que o líder saiba **para quem** enviar solicitações de feromônio, recuperação de estado e o sinal de parada, ele precisa manter uma lista atualizada dos participantes ativos. `MembrosGrupo` encapsula esse conjunto de IDs de forma thread-safe.
+
+Cada nó mantém sua própria instância. O próprio ID nunca é removido do conjunto.
+
+### Construtor
+
+```python
+MembrosGrupo(meu_id: int)
+```
+
+Inicializa o conjunto de participantes contendo apenas o próprio nó.
+
+### Métodos públicos
+
+#### `adicionar(no_id: int) -> None`
+
+Adiciona um nó ao grupo. Chamado sempre que se recebe uma mensagem de um nó conhecido (eleição, registro, líder etc.).
+
+#### `adicionar_varios(ids: list[int]) -> None`
+
+Adiciona vários nós de uma vez. Usado ao receber a lista de `participantes` que acompanha mensagens `LIDER` e `REGISTER_ACK`. Garante que o próprio ID continue presente.
+
+#### `remover(no_id: int) -> None`
+
+Remove um nó do grupo. Chamado quando um worker não responde a um envio, a uma sincronização ou a uma recuperação. **Nunca remove o próprio nó.**
+
+#### `listar() -> list[int]`
+
+Retorna a lista ordenada de todos os participantes (incluindo o próprio nó). Usada em logs e enviada no campo `participantes` das mensagens `LIDER`/`REGISTER_ACK`.
+
+#### `workers() -> list[int]`
+
+Retorna a lista ordenada de participantes **exceto** o próprio nó. É a lista que o líder percorre para solicitar feromônio, pedir recuperação de estado e enviar o sinal de parada.
+
+### Por que uma classe separada?
+
+Mantém toda a lógica de pertinência ao grupo (e a proteção por `Lock`) isolada de `no.py`, no mesmo padrão das demais classes de `coordenacao.py`: estado interno protegido, API simples e testável. O líder e os workers usam exatamente os mesmos métodos — a diferença de comportamento fica em `no.py`.
+
+---
+
 ## Como testar
 
 ### Teste do Relógio de Lamport

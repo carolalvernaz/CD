@@ -16,6 +16,16 @@ Apenas biblioteca padrão do Python - nenhuma instalação necessária.
 | `queue` | Fila thread-safe para mensagens recebidas |
 | `time` | Pausa de inicialização do servidor |
 
+## Constantes de configuração
+
+| Constante | Valor | Descrição |
+|---|---:|---|
+| `TIMEOUT_CONEXAO` | `3` | Timeout (s) ao abrir conexão para enviar |
+| `TIMEOUT_RECV` | `5` | Timeout (s) de leitura de uma conexão recebida — evita que uma conexão travada por queda abrupta segure uma thread para sempre |
+| `BUFFER_SIZE` | `4096` | Tamanho do bloco lido por `recv()` |
+
+As falhas de envio (nó offline) e de leitura (conexão caída, JSON inválido) são tratadas silenciosamente — retornam `False` ou são ignoradas, sem poluir o terminal. A camada acima (`no.py`) decide o que fazer com base no retorno.
+
 
 ## Formato padrão de mensagem
 
@@ -102,6 +112,13 @@ if not sucesso:
 ```
 
 > **Detalhe de implementação:** abre e fecha uma conexão TCP a cada envio.
+
+
+#### `tentar_enviar_mensagem(destino_id: int, mensagem: dict) → bool`
+
+Variante de melhor-esforço (*best-effort*) de `enviar_mensagem`, com o mesmo comportamento: abre a conexão, envia JSON + delimitador e retorna `True`/`False`.
+
+É usada por `no.py` nos pontos em que uma falha de envio é esperada e não é problema — por exemplo, ao **procurar um grupo** na inicialização (`JOIN` para nós que podem não estar no ar) ou ao **disparar uma eleição** (`ELEICAO` para nós maiores que podem ter caído). O nome deixa explícito, no chamador, que ali a falha é tolerada; o `False` já é tratado pela lógica de `no.py`.
 
 
 #### `broadcast(mensagem: dict) → None`

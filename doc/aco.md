@@ -285,6 +285,79 @@ Essa abordagem é simples e estável. Ela evita que um único nó domine imediat
 
 Como melhoria futura, o líder poderia reforçar a melhor rota global recebida entre os nós antes de redistribuir a matriz consolidada.
 
+> **Nota sobre a integração atual:** na versão final do projeto, a sincronização e a recuperação de estado **não** usam mais `aplicar_feromonio_externo`. O líder consolida as matrizes dos nós com o método estático `consolidar_matrizes()` (média elemento a elemento) e substitui a matriz local com `definir_feromonio()`. Os workers, ao receber a matriz consolidada, também usam `definir_feromonio()`. O método `aplicar_feromonio_externo` permanece disponível como estratégia alternativa de mistura local, mas não é chamado por `no.py`.
+
+## `definir_feromonio(matriz_nova: list[list[float]]) -> None`
+
+Substitui completamente a matriz de feromônio interna pela matriz recebida.
+
+Diferente de `aplicar_feromonio_externo` (que faz a **média** entre a matriz local e a externa), `definir_feromonio` **descarta** a matriz local e adota a recebida na íntegra.
+
+### Validações
+
+- a matriz precisa ser quadrada e não vazia (`_validar_matriz_generica`);
+- precisa ter o mesmo tamanho da instância (mesmo número de cidades);
+- a diagonal principal é forçada para `0.0` após a substituição.
+
+### Onde é usado
+
+É o ponto de integração distribuída efetivamente usado por `no.py`:
+
+- o **líder** aplica a média consolidada em si mesmo após a sincronização ou a recuperação de estado;
+- cada **worker** aplica a matriz consolidada que o líder redistribui.
+
+Uso esperado:
+
+`aco.definir_feromonio(matriz_consolidada)`
+
+## `exportar_estado() -> dict`
+
+Retorna um dicionário com o estado relevante do nó para envio pela rede.
+
+### Saída
+
+```python
+{
+    "matriz": [[...], ...],        # cópia da matriz de feromônio atual
+    "melhor_rota": [...],          # melhor rota global encontrada
+    "melhor_distancia": float,     # distância dessa rota
+}
+```
+
+É usado por `no.py` em dois momentos:
+
+- resposta a uma `SOLICITACAO` de feromônio durante a sincronização periódica;
+- resposta a uma `RECUPERACAO` quando um novo líder reconstrói o estado após uma falha.
+
+Empacotar matriz + melhor rota + melhor distância em um único método garante que o líder receba, de uma só vez, tanto o conhecimento de feromônio quanto a melhor solução já encontrada por aquele nó.
+
+## `consolidar_matrizes(matrizes: list[list[list[float]]]) -> list[list[float]]` (estático)
+
+Calcula a média elemento a elemento entre várias matrizes de feromônio.
+
+É um **método estático** — não depende de uma instância de `ACO`. Recebe uma lista de matrizes (as recebidas dos workers mais a do próprio líder) e devolve uma única matriz consolidada.
+
+### Regra
+
+Para cada posição `[i][j]`:
+
+`media[i][j] = (soma de matriz[i][j] de todas as matrizes) / quantidade_de_matrizes`
+
+### Validações
+
+- a lista não pode ser vazia;
+- todas as matrizes devem ter o mesmo tamanho e ser quadradas.
+
+### Onde é usado
+
+É o coração da consolidação distribuída. Tanto a sincronização periódica quanto a recuperação de estado pós-falha chamam:
+
+```python
+matrizes = list(feromonios_recebidos.values()) + [aco.obter_feromonio()]
+media = ACO.consolidar_matrizes(matrizes)
+aco.definir_feromonio(media)
+```
+
 ## `obter_melhor_global() -> tuple[list, float]`
 
 Retorna a melhor rota encontrada pelo objeto `ACO` desde o início da execução.

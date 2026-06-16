@@ -11,6 +11,11 @@ TIMEOUT_CONEXAO = 3
 
 BUFFER_SIZE = 4096
 
+# Timeout de leitura de uma conexao recebida. Cada conexao envia uma rajada
+# curta de bytes e fecha; o timeout so existe para que uma conexao travada
+# (queda abrupta sem fechar o socket) nao segure a thread indefinidamente.
+TIMEOUT_RECV = 5
+
 
 class Rede:
 
@@ -46,7 +51,6 @@ class Rede:
     def enviar_mensagem(self, destino_id: int, mensagem: dict) -> bool:
         
         if destino_id not in self.nos_conhecidos:
-            print(f"[Rede] ERRO: nó {destino_id} não está em nos_conhecidos.")
             return False
 
         host, porta = self.nos_conhecidos[destino_id]
@@ -64,9 +68,9 @@ class Rede:
 
             return True
 
-        except (ConnectionRefusedError, TimeoutError, OSError) as e:
-            # Nó offline ou rede com problema — tratamos silenciosamente.
-            print(f"[Rede] Falha ao enviar para nó {destino_id}: {e}")
+        except (ConnectionRefusedError, TimeoutError, OSError):
+            # Nó offline ou rede com problema — esperado durante quedas de
+            # líder e eleições. A camada acima (no.py) trata o retorno False.
             return False
 
     def broadcast(self, mensagem: dict) -> None:
@@ -129,8 +133,17 @@ class Rede:
         buffer = b""
         try:
             with conn:
+                # Timeout de leitura: se o outro lado caiu de forma abrupta
+                # (queda durante eleição/sync/recuperação) sem fechar a conexão,
+                # o recv não fica preso para sempre segurando a thread.
+                conn.settimeout(TIMEOUT_RECV)
                 while True:
-                    chunk = conn.recv(BUFFER_SIZE)
+                    try:
+                        chunk = conn.recv(BUFFER_SIZE)
+                    except socket.timeout:
+                        # Conexão ociosa/travada — paramos de ler e processamos
+                        # o que já chegou (mensagens completas no buffer).
+                        break
                     if not chunk:
                         break
                     buffer += chunk
@@ -143,11 +156,13 @@ class Rede:
                 try:
                     mensagem = json.loads(parte.decode("utf-8"))
                     self._fila.put(mensagem)
-                except json.JSONDecodeError as e:
-                    print(f"[Rede] JSON inválido recebido de {endereco}: {e}")
+                except json.JSONDecodeError:
+                    # Mensagem malformada — ignora e segue para a próxima.
+                    continue
 
-        except OSError as e:
-            print(f"[Rede] Erro ao ler conexão de {endereco}: {e}")
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            # Queda abrupta da conexão — não deve derrubar o nó.
+            pass
 
     def tentar_enviar_mensagem(self, destino_id: int, mensagem: dict) -> bool:
         if destino_id not in self.nos_conhecidos:

@@ -91,6 +91,28 @@ O no 5 assume como lider apos a eleicao inicial. Se ele for encerrado, os nos re
 
 Para encerrar um no, use `Ctrl+C` no terminal correspondente.
 
+### Como provocar a falha do lider
+
+Com os 5 nos rodando e o no 5 como lider:
+
+1. Va ao terminal do no 5 e pressione `Ctrl+C` (ou feche o terminal).
+2. Os workers param de receber as solicitacoes de sincronizacao do lider.
+3. Apos `8s` sem contato, o no de maior ID vivo (no 4) inicia a eleicao Bully e assume.
+4. O novo lider executa a **recuperacao de estado pos-falha**: pede a cada sobrevivente
+   sua matriz de feromonio, consolida a media e redistribui — a busca continua sem reinicio.
+
+O que observar nos terminais sobreviventes:
+
+```
+[ELEI] Lider 5 nao respondeu por 8.1s. Iniciando nova eleicao.
+[ELEI] No 4 assumiu como lider. Participantes: [1, 2, 3, 4]
+[REC]  Lider 4 solicitando estados para recuperacao.
+[REC]  Estado consolidado com 3 worker(s). Participantes: [1, 2, 3, 4]
+[SYNC] Feromonio sincronizado com 3 worker(s). ...
+```
+
+Pode-se derrubar o novo lider (no 4) em seguida para ver a cadeia 4 -> 3 -> 2 -> 1.
+
 ## Modo benchmark
 
 Para parar apos 100 iteracoes (usado nos experimentos comparativos):
